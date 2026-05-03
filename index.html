@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clinic Manager — Belgaum</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:#F0F0EE}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;color:#1a1a1a}
+input,select,textarea{font-family:inherit;font-size:14px;width:100%;padding:9px 11px;border:1px solid #e0e0e0;border-radius:8px;background:#fff;color:#1a1a1a;outline:none}
+input:focus,select:focus,textarea:focus{border-color:#0F6E56;box-shadow:0 0 0 3px rgba(15,110,86,0.08)}
+button{font-family:inherit;cursor:pointer}
+button:active{opacity:0.8}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:200;display:flex;align-items:flex-end;justify-content:center}
+.modal-box{background:#fff;border-radius:18px 18px 0 0;padding:22px 18px 40px;width:100%;max-width:520px;max-height:90vh;overflow-y:auto}
+.card{background:#fff;border:1px solid #e8e8e8;border-radius:14px;margin-bottom:14px;overflow:visible}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.span2{grid-column:1/-1}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef}=React;
+const {BarChart,Bar,XAxis,YAxis,CartesianGrid,Tooltip,ResponsiveContainer,LineChart,Line,Legend}=Recharts;
+
+const SB="https://kgqoaybpypclruzmpfrx.supabase.co";
+const KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtncW9heWJweXBjbHJ1em1wZnJ4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNjE0ODMsImV4cCI6MjA5MjkzNzQ4M30.xcQpRm6NYbWvrUGK632xC6FBDy7z6MaUQpog39L5U78";
+
+async function api(method,table,qs="",body=null,prefer=""){
+  const h={apikey:KEY,Authorization:`Bearer ${KEY}`,"Content-Type":"application/json"};
+  if(prefer)h.Prefer=prefer;
+  const r=await fetch(`${SB}/rest/v1/${table}${qs?"?"+qs:""}`,{method,headers:h,body:body?JSON.stringify(body):null});
+  if(r.status===204)return null;
+  return r.json();
+}
+
+const PASS={receptionist:"12345678",doctor:"ganesh1"};
+const MAX=12;
+const tod=()=>new Date().toISOString().split("T")[0];
+const inr=(n)=>"₹"+(Number(n)||0).toLocaleString("en-IN");
+
+const DOC={
+  not_confirmed:{l:"Not confirmed",c:"#6b7280",bg:"#f3f4f6"},
+  on_the_way:{l:"On the way 🚗",c:"#92400e",bg:"#fef3c7"},
+  at_clinic:{l:"At clinic ✓",c:"#065f46",bg:"#d1fae5"},
+  not_coming:{l:"Not coming ✗",c:"#991b1b",bg:"#fee2e2"},
+};
+const STS={
+  waiting:{l:"Waiting",c:"#1e40af",bg:"#dbeafe"},
+  in_consultation:{l:"In room",c:"#92400e",bg:"#fef3c7"},
+  done:{l:"Done",c:"#065f46",bg:"#d1fae5"},
+  no_show:{l:"No show",c:"#6b7280",bg:"#f3f4f6"},
+  carried_forward:{l:"Carried fwd",c:"#9ca3af",bg:"#f9fafb"},
+};
+
+const Tag=({bg,c,children})=><span style={{fontSize:11,padding:"3px 9px",borderRadius:20,fontWeight:600,background:bg,color:c,whiteSpace:"nowrap"}}>{children}</span>;
+const Lbl=({t})=><div style={{fontSize:12,color:"#888",marginBottom:4}}>{t}</div>;
+const Fld=({label,span,children})=><div style={span?{gridColumn:"1/-1"}:{}}><Lbl t={label}/>{children}</div>;
+const GBtn=({onClick,children,full,style={}})=>(
+  <button onClick={onClick} style={{background:"#0F6E56",color:"#fff",border:"none",borderRadius:9,padding:"10px 18px",fontWeight:600,fontSize:14,width:full?"100%":"auto",...style}}>{children}</button>
+);
+const WBtn=({onClick,children,full,style={}})=>(
+  <button onClick={onClick} style={{background:"#f5f5f5",color:"#444",border:"none",borderRadius:9,padding:"10px 18px",fontSize:14,width:full?"100%":"auto",...style}}>{children}</button>
+);
+
+function App(){
+  const[role,setRole]=useState(null);
+  const[view,setView]=useState("today");
+  const[date,setDate]=useState(tod());
+  const[sessions,setSessions]=useState({});
+  const[appts,setAppts]=useState([]);
+  const[loading,setLoading]=useState(false);
+  const[modal,setModal]=useState(null);
+  const[monthData,setMonthData]=useState(null);
+  const[searchRes,setSearchRes]=useState(null);
+  const[searchQ,setSearchQ]=useState("");
+  const[toast,setToast]=useState(null);
+
+  const notify=(msg,err)=>{setToast({msg,err});setTimeout(()=>setToast(null),2500)};
+
+  const reload=async(d=date)=>{
+    setLoading(true);
+    try{
+      for(const t of["afternoon","evening"]){
+        try{await api("POST","clinic_sessions","",{date:d,session_type:t,doctor_status:"not_confirmed",max_cap:MAX},"resolution=ignore-duplicates,return=representation")}catch(e){}
+      }
+      const[s,a]=await Promise.all([
+        api("GET","clinic_sessions",`date=eq.${d}`),
+        api("GET","appointments",`date=eq.${d}&order=session_type.asc,queue_number.asc`),
+      ]);
+      const sm={};(s||[]).forEach(x=>sm[x.session_type]=x);
+      setSessions(sm);setAppts(a||[]);
+    }catch(e){notify("Error loading","error");}
+    finally{setLoading(false);}
+  };
+
+  const loadMonth=async(d=date)=>{
+    const[y,m]=d.split("-");
+    const last=new Date(+y,+m,0).getDate();
+    const data=await api("GET","appointments",`date=gte.${y}-${m}-01&date=lte.${y}-${m}-${String(last).padStart(2,"0")}&status=not.in.(no_show,carried_forward)&order=date.asc`);
+    setMonthData(data||[]);
+  };
+
+  const doSearch=async(q)=>{
+    if(!q.trim())return;
+    const[a,b]=await Promise.all([
+      api("GET","appointments",`patient_name=ilike.*${q.trim()}*&order=date.desc&limit=50`),
+      api("GET","appointments",`phone=ilike.*${q.trim()}*&order=date.desc&limit=50`),
+    ]);
+    const merged=Object.values([...(a||[]),...(b||[])].reduce((m,x)=>{m[x.id]=x;return m;},{}));
+    merged.sort((a,b)=>b.date.localeCompare(a.date));
+    setSearchRes(merged);
+  };
+
+  useEffect(()=>{if(role&&view==="today")reload();},[role,date]);
+  useEffect(()=>{if(role&&view==="monthly")loadMonth();},[role,view,date]);
+
+  if(!role)return <Login onLogin={r=>{setRole(r);}}/>;
+
+  return(
+    <div style={{minHeight:"100vh",background:"#F0F0EE"}}>
+      {/* HEADER */}
+      <div style={{background:"#0F6E56",padding:"10px 16px",position:"sticky",top:0,zIndex:10}}>
+        <div style={{maxWidth:640,margin:"0 auto"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+            <div>
+              <div style={{color:"rgba(255,255,255,0.55)",fontSize:11,letterSpacing:1}}>PULMONOLOGY · BELGAUM</div>
+              <div style={{color:"#fff",fontWeight:600,fontSize:15}}>{role==="doctor"?"Doctor view":"Receptionist"}</div>
+            </div>
+            <div style={{display:"flex",gap:6,alignItems:"center"}}>
+              <input type="date" value={date} onChange={e=>{setDate(e.target.value);}}
+                style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",padding:"5px 8px",borderRadius:7,fontSize:12,width:"auto",colorScheme:"dark"}}/>
+              <button onClick={()=>setRole(null)} style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",padding:"5px 10px",borderRadius:7,fontSize:13}}>✕</button>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:6}}>
+            {["today","monthly","search"].map(v=>(
+              <button key={v} onClick={()=>{setView(v);if(v==="today")reload(date);if(v==="monthly")loadMonth(date);}}
+                style={{flex:1,background:view===v?"rgba(255,255,255,0.25)":"rgba(255,255,255,0.1)",border:"none",color:"#fff",padding:"7px",borderRadius:8,fontSize:12,fontWeight:view===v?700:400}}>
+                {v==="today"?"Today":v==="monthly"?"Monthly":"Search"}
+              </button>
+            ))}
+          </div>
+          {view==="search"&&(
+            <div style={{display:"flex",gap:6,marginTop:8}}>
+              <input value={searchQ} onChange={e=>setSearchQ(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&doSearch(searchQ)}
+                placeholder="Search by name or phone..." style={{flex:1,background:"rgba(255,255,255,0.9)",borderRadius:8,border:"none",fontSize:13}}/>
+              <button onClick={()=>doSearch(searchQ)} style={{background:"#fff",color:"#0F6E56",border:"none",borderRadius:8,padding:"8px 14px",fontWeight:700,fontSize:13}}>Go</button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* BODY */}
+      <div style={{padding:"14px 16px 60px",maxWidth:640,margin:"0 auto"}}>
+        {loading&&<div style={{textAlign:"center",padding:"4rem",color:"#bbb"}}>Loading...</div>}
+
+        {!loading&&view==="today"&&<Today date={date} sessions={sessions} appts={appts} role={role} setModal={setModal} reload={reload} notify={notify}/>}
+        {view==="monthly"&&<Monthly data={monthData} date={date}/>}
+        {view==="search"&&<Search results={searchRes} query={searchQ}/>}
+      </div>
+
+      {/* MODAL */}
+      {modal&&(
+        <div className="modal-bg" onClick={e=>e.currentTarget===e.target&&setModal(null)}>
+          <div className="modal-box">
+            {modal.mode==="add"&&<AddModal modal={modal} date={date} onClose={()=>setModal(null)} reload={reload} notify={notify}/>}
+            {modal.mode==="edit"&&<EditModal appt={modal.appt} onClose={()=>setModal(null)} reload={reload} notify={notify}/>}
+            {modal.mode==="wa"&&<WAModal appt={modal.appt} onClose={()=>setModal(null)}/>}
+            {modal.mode==="note"&&<NoteModal appt={modal.appt} role={role} onClose={()=>setModal(null)} reload={reload} notify={notify}/>}
+            {modal.mode==="fee"&&<FeeModal appt={modal.appt} onClose={()=>setModal(null)} reload={reload} notify={notify}/>}
+          </div>
+        </div>
+      )}
+
+      {/* TOAST */}
+      {toast&&(
+        <div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",background:toast.err?"#991b1b":"#065f46",color:"#fff",padding:"10px 22px",borderRadius:30,fontSize:13,fontWeight:600,zIndex:500,boxShadow:"0 4px 16px rgba(0,0,0,0.2)",whiteSpace:"nowrap"}}>
+          {toast.msg}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── LOGIN ── */
+function Login({onLogin}){
+  const[pw,setPw]=useState("");
+  const[err,setErr]=useState(false);
+  const go=()=>{
+    if(pw===PASS.receptionist)return onLogin("receptionist");
+    if(pw===PASS.doctor)return onLogin("doctor");
+    setErr(true);setTimeout(()=>setErr(false),2000);
+  };
+  return(
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{background:"#fff",borderRadius:18,padding:"2.5rem 2rem",width:"100%",maxWidth:320,boxShadow:"0 4px 32px rgba(0,0,0,0.08)",textAlign:"center"}}>
+        <div style={{fontSize:44,marginBottom:12}}>🫁</div>
+        <div style={{fontWeight:700,fontSize:20,color:"#0F6E56",marginBottom:4}}>Clinic Manager</div>
+        <div style={{fontSize:13,color:"#aaa",marginBottom:28}}>Shree Balaji Arcade, Goaves Circle<br/>Belgaum</div>
+        <input type="password" placeholder="Enter password" value={pw}
+          onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&go()}
+          style={{marginBottom:err?8:16,borderColor:err?"#dc2626":"#e0e0e0"}} autoFocus/>
+        {err&&<div style={{color:"#dc2626",fontSize:13,marginBottom:10}}>Incorrect password.</div>}
+        <GBtn onClick={go} full>Sign in</GBtn>
+        <div style={{fontSize:12,color:"#ccc",marginTop:14}}>Receptionist or Doctor</div>
+      </div>
+    </div>
+  );
+}
+
+/* ── TODAY ── */
+function Today({date,sessions,appts,role,setModal,reload,notify}){
+  const active=appts.filter(a=>a.status!=="carried_forward");
+  const collected=active.filter(a=>a.fee_status==="paid").reduce((s,a)=>s+(+a.fee_amount||0),0);
+  const pending=active.filter(a=>a.fee_status==="pending").reduce((s,a)=>s+(+a.fee_amount||0),0);
+  return(<>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:14}}>
+      {[{l:"Total",v:active.length},{l:"In room",v:active.filter(a=>a.status==="in_consultation").length},{l:"Collected",v:inr(collected)},{l:"Pending",v:inr(pending)}].map(({l,v})=>(
+        <div key={l} style={{background:"#fff",borderRadius:10,padding:"10px 12px",border:"1px solid #e8e8e8"}}>
+          <div style={{fontSize:11,color:"#aaa",marginBottom:4}}>{l}</div>
+          <div style={{fontSize:16,fontWeight:700}}>{v}</div>
+        </div>
+      ))}
+    </div>
+    {["afternoon","evening"].map(type=>(
+      <SessionCard key={type} type={type} sess={sessions[type]}
+        appts={appts.filter(a=>a.session_type===type)}
+        role={role} sessions={sessions} setModal={setModal} reload={reload} notify={notify}/>
+    ))}
+  </>);
+}
+
+/* ── SESSION CARD ── */
+function SessionCard({type,sess,appts,role,sessions,setModal,reload,notify}){
+  const[open,setOpen]=useState(false);
+  const ref=useRef();
+  useEffect(()=>{
+    const fn=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false)};
+    document.addEventListener("mousedown",fn);
+    return()=>document.removeEventListener("mousedown",fn);
+  },[]);
+  if(!sess)return null;
+  const active=appts.filter(a=>a.status!=="carried_forward");
+  const ds=DOC[sess.doctor_status]||DOC.not_confirmed;
+  const over=active.length>=sess.max_cap;
+  const setDocStatus=async k=>{await api("PATCH","clinic_sessions",`id=eq.${sess.id}`,{doctor_status:k});setOpen(false);reload();};
+  return(
+    <div className="card">
+      <div style={{padding:"12px 16px",borderBottom:"1px solid #f0f0f0",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div>
+          <span style={{fontWeight:700,fontSize:16,color:"#0F6E56",textTransform:"capitalize"}}>{type}</span>
+          <span style={{fontSize:12,color:"#ccc",marginLeft:8}}>{type==="afternoon"?"~1:00–4:30 PM":"~6:30–9:00 PM"}</span>
+          <span style={{fontSize:12,marginLeft:8,color:over?"#dc2626":"#ccc",fontWeight:over?700:400}}>{active.length}/{sess.max_cap}</span>
+        </div>
+        <div ref={ref} style={{position:"relative"}}>
+          <span onClick={()=>setOpen(!open)} style={{background:ds.bg,color:ds.c,fontSize:11,padding:"4px 12px",borderRadius:20,cursor:"pointer",fontWeight:600,userSelect:"none"}}>{ds.l}</span>
+          {open&&(
+            <div style={{position:"absolute",right:0,top:"130%",background:"#fff",border:"1px solid #e0e0e0",borderRadius:12,zIndex:50,minWidth:180,boxShadow:"0 8px 24px rgba(0,0,0,0.13)"}}>
+              {Object.entries(DOC).map(([k,v])=>(
+                <div key={k} onClick={()=>setDocStatus(k)} style={{padding:"10px 16px",fontSize:13,cursor:"pointer",color:v.c,background:sess.doctor_status===k?v.bg:"transparent",fontWeight:sess.doctor_status===k?700:400}}>{v.l}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+      {over&&role==="receptionist"&&<div style={{background:"#fee2e2",color:"#991b1b",fontSize:12,padding:"6px 16px",fontWeight:600}}>⚠ Session at capacity — {active.length}/{sess.max_cap}</div>}
+      {active.length===0
+        ?<div style={{padding:"22px",textAlign:"center",color:"#ccc",fontSize:13}}>No patients booked for this session</div>
+        :active.map((a,i)=>(
+          <PatientRow key={a.id} appt={a} idx={i} type={type} role={role}
+            sessions={sessions} allAppts={appts} setModal={setModal} reload={reload} notify={notify}/>
+        ))
+      }
+      {role==="receptionist"&&(
+        <div style={{padding:"10px 16px",borderTop:active.length>0?"1px solid #f5f5f5":"none"}}>
+          <button onClick={()=>setModal({mode:"add",sess,qNum:active.length+1})}
+            style={{width:"100%",padding:"9px",background:"#E1F5EE",color:"#085041",border:"none",borderRadius:9,fontSize:13,fontWeight:700}}>
+            + Add patient
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── PATIENT ROW ── */
+function PatientRow({appt:a,idx,type,role,sessions,allAppts,setModal,reload,notify}){
+  const[open,setOpen]=useState(false);
+  const ps=STS[a.status]||STS.waiting;
+  const updStatus=async s=>{await api("PATCH","appointments",`id=eq.${a.id}`,{status:s});reload();};
+  const carryFwd=async()=>{
+    const es=sessions.evening;
+    if(!es){notify("No evening session found","error");return;}
+    const evActive=allAppts.filter(x=>x.session_type==="evening"&&x.status!=="carried_forward");
+    await api("PATCH","appointments",`id=eq.${a.id}`,{status:"carried_forward"});
+    await api("POST","appointments","",{session_id:es.id,date:a.date,session_type:"evening",queue_number:evActive.length+1,patient_name:a.patient_name,age:a.age,gender:a.gender,phone:a.phone,problem:a.problem,patient_type:a.patient_type,status:"waiting",fee_amount:a.fee_amount,fee_status:"pending",payment_mode:"none",carried_from:a.id},"return=representation");
+    notify(`${a.patient_name} moved to evening`);reload();
+  };
+  return(
+    <div style={{borderTop:idx>0?"1px solid #f5f5f5":"none"}}>
+      <div onClick={()=>setOpen(!open)} style={{padding:"11px 16px",display:"flex",alignItems:"center",gap:10,cursor:"pointer",userSelect:"none"}}>
+        <div style={{width:28,height:28,borderRadius:"50%",background:"#E1F5EE",color:"#085041",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,flexShrink:0}}>{a.queue_number}</div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontWeight:600,fontSize:14}}>{a.patient_name}</div>
+          <div style={{fontSize:12,color:"#aaa",marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{[a.age?a.age+"y":null,a.gender,a.problem].filter(Boolean).join(" · ")}</div>
+        </div>
+        <div style={{display:"flex",gap:5,alignItems:"center",flexShrink:0}}>
+          <Tag bg={a.patient_type==="new"?"#dbeafe":"#fef3c7"} c={a.patient_type==="new"?"#1e40af":"#92400e"}>{a.patient_type==="new"?"New":"F/U"}</Tag>
+          <Tag bg={ps.bg} c={ps.c}>{ps.l}</Tag>
+          <span style={{color:"#ccc",fontSize:12}}>{open?"▲":"▼"}</span>
+        </div>
+      </div>
+      {open&&(
+        <div style={{padding:"0 16px 14px",paddingLeft:54,borderTop:"1px solid #f8f8f8"}}>
+          <div style={{display:"flex",gap:14,flexWrap:"wrap",fontSize:12,color:"#888",margin:"8px 0"}}>
+            <span style={{fontWeight:700,color:"#1a1a1a"}}>{inr(a.fee_amount)}</span>
+            <span style={{color:a.fee_status==="paid"?"#065f46":"#991b1b",fontWeight:600,textTransform:"capitalize"}}>{a.fee_status}</span>
+            {a.payment_mode&&a.payment_mode!=="none"&&<span style={{textTransform:"capitalize"}}>{a.payment_mode}</span>}
+            {a.phone&&<span>📞 {a.phone}</span>}
+          </div>
+          {a.carried_from&&<div style={{fontSize:11,color:"#bbb",marginBottom:4}}>↳ Carried from afternoon</div>}
+          {a.receptionist_notes&&<div style={{fontSize:12,color:"#555",fontStyle:"italic",marginBottom:4}}>📋 {a.receptionist_notes}</div>}
+          {a.doctor_notes&&<div style={{fontSize:12,color:"#0F6E56",fontStyle:"italic",marginBottom:4}}>🩺 Dr: {a.doctor_notes}</div>}
+          <div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:10}}>
+            {role==="receptionist"&&["waiting","in_consultation","done","no_show"].map(s=>{
+              const st=STS[s];
+              return <button key={s} onClick={()=>updStatus(s)} style={{background:a.status===s?st.bg:"#f5f5f5",color:a.status===s?st.c:"#777",border:"none",borderRadius:7,padding:"5px 10px",fontSize:11,fontWeight:a.status===s?700:400,cursor:"pointer"}}>{st.l}</button>;
+            })}
+            {role==="receptionist"&&type==="afternoon"&&sessions.evening&&a.status==="no_show"&&(
+              <button onClick={carryFwd} style={{background:"#fef3c7",color:"#92400e",border:"none",borderRadius:7,padding:"5px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>→ Move to Evening</button>
+            )}
+            {role==="receptionist"&&<button onClick={()=>setModal({mode:"fee",appt:a})} style={{background:"#f0f0f0",color:"#555",border:"none",borderRadius:7,padding:"5px 10px",fontSize:11,cursor:"pointer"}}>₹ Update fee</button>}
+            {role==="receptionist"&&<button onClick={()=>setModal({mode:"wa",appt:a})} style={{background:"#d1fae5",color:"#065f46",border:"none",borderRadius:7,padding:"5px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>💬 WhatsApp</button>}
+            {role==="receptionist"&&<button onClick={()=>setModal({mode:"edit",appt:a})} style={{background:"#f0f0f0",color:"#555",border:"none",borderRadius:7,padding:"5px 10px",fontSize:11,cursor:"pointer"}}>✏ Edit</button>}
+            <button onClick={()=>setModal({mode:"note",appt:a})} style={{background:"#f0f0f0",color:"#555",border:"none",borderRadius:7,padding:"5px 10px",fontSize:11,cursor:"pointer"}}>{role==="doctor"?"🩺 My note":"📋 Note"}</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── ADD PATIENT MODAL ── */
+function AddModal({modal,date,onClose,reload,notify}){
+  const[f,setF]=useState({name:"",age:"",gender:"female",phone:"",problem:"",type:"new",fee:"300",feeStatus:"paid",mode:"cash",note:""});
+  const u=(k,v)=>setF(p=>({...p,[k]:v}));
+  const save=async()=>{
+    if(!f.name.trim()){notify("Patient name required","error");return;}
+    await api("POST","appointments","",{session_id:modal.sess.id,date,session_type:modal.sess.session_type,queue_number:modal.qNum,patient_name:f.name.trim(),age:f.age?+f.age:null,gender:f.gender,phone:f.phone||null,problem:f.problem||null,patient_type:f.type,status:"waiting",fee_amount:+f.fee||0,fee_status:f.feeStatus,payment_mode:f.mode,receptionist_notes:f.note||null},"return=representation");
+    notify(`${f.name} added`);onClose();reload();
+  };
+  return(<>
+    <div style={{fontWeight:700,fontSize:17,color:"#0F6E56",marginBottom:4}}>Add patient</div>
+    <div style={{fontSize:12,color:"#bbb",marginBottom:18}}>#{modal.qNum} · {modal.sess.session_type} · {date}</div>
+    <div className="grid2" style={{marginBottom:18}}>
+      <Fld label="Patient name *" span><input value={f.name} onChange={e=>u("name",e.target.value)} placeholder="Full name" autoFocus/></Fld>
+      <Fld label="Age"><input type="number" value={f.age} onChange={e=>u("age",e.target.value)} placeholder="Years" min={0} max={120}/></Fld>
+      <Fld label="Gender"><select value={f.gender} onChange={e=>u("gender",e.target.value)}><option value="female">Female</option><option value="male">Male</option><option value="other">Other</option></select></Fld>
+      <Fld label="Phone"><input value={f.phone} onChange={e=>u("phone",e.target.value)} placeholder="Mobile number"/></Fld>
+      <Fld label="Patient type"><select value={f.type} onChange={e=>u("type",e.target.value)}><option value="new">New patient</option><option value="follow_up">Follow-up</option></select></Fld>
+      <Fld label="Problem / complaint" span><input value={f.problem} onChange={e=>u("problem",e.target.value)} placeholder="e.g. breathlessness, asthma, TB review"/></Fld>
+      <Fld label="Fee (₹)"><input type="number" value={f.fee} onChange={e=>u("fee",e.target.value)} min={0}/></Fld>
+      <Fld label="Fee status"><select value={f.feeStatus} onChange={e=>u("feeStatus",e.target.value)}><option value="paid">Paid</option><option value="pending">Pending</option><option value="partial">Partial</option></select></Fld>
+      <Fld label="Payment mode" span><select value={f.mode} onChange={e=>u("mode",e.target.value)}><option value="cash">Cash</option><option value="upi">UPI</option><option value="card">Card</option><option value="none">Not paid yet</option></select></Fld>
+      <Fld label="Note (optional)" span><input value={f.note} onChange={e=>u("note",e.target.value)} placeholder="e.g. referred by Dr. Mehta, has old reports"/></Fld>
+    </div>
+    <div style={{display:"flex",gap:8}}>
+      <WBtn onClick={onClose} style={{flex:1}}>Cancel</WBtn>
+      <GBtn onClick={save} style={{flex:2}}>Add to queue</GBtn>
+    </div>
+  </>);
+}
+
+/* ── EDIT PATIENT MODAL ── */
+function EditModal({appt,onClose,reload,notify}){
+  const[f,setF]=useState({name:appt.patient_name||"",age:appt.age||"",gender:appt.gender||"female",phone:appt.phone||"",problem:appt.problem||"",type:appt.patient_type||"new"});
+  const u=(k,v)=>setF(p=>({...p,[k]:v}));
+  const save=async()=>{
+    await api("PATCH","appointments",`id=eq.${appt.id}`,{patient_name:f.name,age:f.age?+f.age:null,gender:f.gender,phone:f.phone||null,problem:f.problem||null,patient_type:f.type});
+    notify("Patient updated");onClose();reload();
+  };
+  return(<>
+    <div style={{fontWeight:700,fontSize:17,color:"#0F6E56",marginBottom:18}}>Edit patient</div>
+    <div className="grid2" style={{marginBottom:18}}>
+      <Fld label="Name" span><input value={f.name} onChange={e=>u("name",e.target.value)} autoFocus/></Fld>
+      <Fld label="Age"><input type="number" value={f.age} onChange={e=>u("age",e.target.value)} min={0}/></Fld>
+      <Fld label="Gender"><select value={f.gender} onChange={e=>u("gender",e.target.value)}><option value="female">Female</option><option value="male">Male</option><option value="other">Other</option></select></Fld>
+      <Fld label="Phone"><input value={f.phone} onChange={e=>u("phone",e.target.value)}/></Fld>
+      <Fld label="Type"><select value={f.type} onChange={e=>u("type",e.target.value)}><option value="new">New</option><option value="follow_up">Follow-up</option></select></Fld>
+      <Fld label="Problem" span><input value={f.problem} onChange={e=>u("problem",e.target.value)}/></Fld>
+    </div>
+    <div style={{display:"flex",gap:8}}><WBtn onClick={onClose} style={{flex:1}}>Cancel</WBtn><GBtn onClick={save} style={{flex:2}}>Save changes</GBtn></div>
+  </>);
+}
+
+/* ── FEE MODAL ── */
+function FeeModal({appt,onClose,reload,notify}){
+  const[fee,setFee]=useState(appt.fee_amount||"");
+  const[fs,setFs]=useState(appt.fee_status||"paid");
+  const[mode,setMode]=useState(appt.payment_mode||"cash");
+  const save=async()=>{
+    await api("PATCH","appointments",`id=eq.${appt.id}`,{fee_amount:+fee,fee_status:fs,payment_mode:mode});
+    notify("Fee updated");onClose();reload();
+  };
+  return(<>
+    <div style={{fontWeight:700,fontSize:17,color:"#0F6E56",marginBottom:4}}>Update fee</div>
+    <div style={{fontSize:13,color:"#aaa",marginBottom:18}}>{appt.patient_name}</div>
+    <div className="grid2" style={{marginBottom:18}}>
+      <Fld label="Fee amount (₹)" span><input type="number" value={fee} onChange={e=>setFee(e.target.value)} autoFocus/></Fld>
+      <Fld label="Fee status"><select value={fs} onChange={e=>setFs(e.target.value)}><option value="paid">Paid</option><option value="pending">Pending</option><option value="partial">Partial</option></select></Fld>
+      <Fld label="Payment mode"><select value={mode} onChange={e=>setMode(e.target.value)}><option value="cash">Cash</option><option value="upi">UPI</option><option value="card">Card</option><option value="none">—</option></select></Fld>
+    </div>
+    <div style={{display:"flex",gap:8}}><WBtn onClick={onClose} style={{flex:1}}>Cancel</WBtn><GBtn onClick={save} style={{flex:2}}>Save</GBtn></div>
+  </>);
+}
+
+/* ── WHATSAPP MODAL ── */
+function WAModal({appt,onClose}){
+  const sess=appt.session_type==="afternoon"?"afternoon (1–4:30 PM)":"evening (6:30–9 PM)";
+  const tpls=[
+    ["Appointment reminder",`Hello ${appt.patient_name}, this is a reminder for your appointment with Dr. today during the ${sess} session. Please arrive on time and bring any previous reports. Thank you.`],
+    ["Doctor running late",`Hello ${appt.patient_name}, Dr. is running slightly late today. She will attend to you shortly. Thank you for your patience.`],
+    ["Please bring reports",`Hello ${appt.patient_name}, please bring all previous prescriptions, X-rays and test reports to your appointment today. Thank you.`],
+    ["Fee pending",`Hello ${appt.patient_name}, this is a gentle reminder that your consultation fee of ${inr(appt.fee_amount)} is still pending. Please clear it at your next visit. Thank you.`],
+    ["Session cancelled",`Hello ${appt.patient_name}, unfortunately Dr. is unable to attend the clinic today for the ${sess} session. We apologise and will reschedule your appointment soon.`],
+  ];
+  return(<>
+    <div style={{fontWeight:700,fontSize:17,color:"#0F6E56",marginBottom:4}}>WhatsApp templates</div>
+    <div style={{fontSize:13,color:"#aaa",marginBottom:16}}>{appt.patient_name}{appt.phone?` · ${appt.phone}`:""}</div>
+    {tpls.map(([label,msg],i)=>(
+      <div key={i} style={{border:"1px solid #e8e8e8",borderRadius:12,padding:"12px 14px",marginBottom:10}}>
+        <div style={{fontSize:12,fontWeight:700,color:"#444",marginBottom:6}}>{label}</div>
+        <div style={{fontSize:13,color:"#555",lineHeight:1.65,marginBottom:10}}>{msg}</div>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={()=>navigator.clipboard.writeText(msg).then(()=>alert("Copied!"))} style={{background:"#f5f5f5",border:"none",borderRadius:7,padding:"5px 12px",fontSize:11,cursor:"pointer"}}>Copy</button>
+          {appt.phone&&(
+            <a href={`https://wa.me/91${appt.phone.replace(/\D/g,"")}?text=${encodeURIComponent(msg)}`} target="_blank" rel="noopener noreferrer"
+              style={{background:"#d1fae5",color:"#065f46",borderRadius:7,padding:"5px 12px",fontSize:11,fontWeight:700,textDecoration:"none",display:"inline-block"}}>
+              Open WhatsApp ↗
+            </a>
+          )}
+        </div>
+      </div>
+    ))}
+    <WBtn onClick={onClose} full style={{marginTop:4}}>Close</WBtn>
+  </>);
+}
+
+/* ── NOTE MODAL ── */
+function NoteModal({appt,role,onClose,reload,notify}){
+  const field=role==="doctor"?"doctor_notes":"receptionist_notes";
+  const[note,setNote]=useState(appt[field]||"");
+  const save=async()=>{
+    await api("PATCH","appointments",`id=eq.${appt.id}`,{[field]:note});
+    notify("Note saved");onClose();reload();
+  };
+  return(<>
+    <div style={{fontWeight:700,fontSize:17,color:"#0F6E56",marginBottom:4}}>{role==="doctor"?"Doctor's private note":"Receptionist note"}</div>
+    <div style={{fontSize:13,color:"#aaa",marginBottom:14}}>{appt.patient_name}</div>
+    <textarea value={note} onChange={e=>setNote(e.target.value)} autoFocus
+      style={{height:120,resize:"vertical",display:"block",marginBottom:14}}
+      placeholder={role==="doctor"?"Private note — only you can see this...":"Note for today..."}/>
+    <div style={{display:"flex",gap:8}}><WBtn onClick={onClose} style={{flex:1}}>Cancel</WBtn><GBtn onClick={save} style={{flex:2}}>Save note</GBtn></div>
+  </>);
+}
+
+/* ── SEARCH ── */
+function Search({results,query}){
+  if(!results)return<div style={{textAlign:"center",padding:"3rem",color:"#ccc",fontSize:13}}>Type a name or phone number above and press Go.</div>;
+  if(!results.length)return<div style={{textAlign:"center",padding:"3rem",color:"#ccc",fontSize:13}}>No patients found for "{query}".</div>;
+  return(<>
+    <div style={{fontSize:13,color:"#aaa",marginBottom:12}}>{results.length} result{results.length!==1?"s":""} for "{query}"</div>
+    {results.map(a=>{
+      const ps=STS[a.status]||STS.waiting;
+      return(
+        <div key={a.id} style={{background:"#fff",border:"1px solid #e8e8e8",borderRadius:12,padding:"12px 16px",marginBottom:8,display:"flex",alignItems:"center",gap:10}}>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontWeight:600,fontSize:14}}>{a.patient_name}</div>
+            <div style={{fontSize:12,color:"#aaa",marginTop:2}}>{[a.age?a.age+"y":null,a.gender,a.problem].filter(Boolean).join(" · ")}</div>
+            <div style={{fontSize:11,color:"#ccc",marginTop:2}}>{a.date} · {a.session_type} · {inr(a.fee_amount)} · {a.fee_status}</div>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-end"}}>
+            <Tag bg={ps.bg} c={ps.c}>{ps.l}</Tag>
+            {a.phone&&<span style={{fontSize:11,color:"#aaa"}}>📞 {a.phone}</span>}
+          </div>
+        </div>
+      );
+    })}
+  </>);
+}
+
+/* ── MONTHLY ── */
+function Monthly({data,date}){
+  if(!data)return<div style={{textAlign:"center",padding:"4rem",color:"#bbb"}}>Loading...</div>;
+  const[y,m]=date.split("-");
+  const label=new Date(+y,+m-1,1).toLocaleDateString("en-IN",{month:"long",year:"numeric"});
+  const total=data.reduce((s,a)=>s+(+a.fee_amount||0),0);
+  const coll=data.filter(a=>a.fee_status==="paid").reduce((s,a)=>s+(+a.fee_amount||0),0);
+  const pend=data.filter(a=>a.fee_status!=="paid").reduce((s,a)=>s+(+a.fee_amount||0),0);
+  const byDay={};
+  data.forEach(a=>{
+    const d=+a.date.split("-")[2];
+    if(!byDay[d])byDay[d]={day:d,New:0,Followup:0,Revenue:0};
+    a.patient_type==="new"?byDay[d].New++:byDay[d].Followup++;
+    if(a.fee_status==="paid")byDay[d].Revenue+=(+a.fee_amount||0);
+  });
+  const chart=Object.values(byDay).sort((a,b)=>a.day-b.day);
+  return(<>
+    <div style={{fontWeight:700,fontSize:19,color:"#0F6E56",marginBottom:16}}>{label}</div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
+      {[{l:"Total patients",v:data.length},{l:"New",v:data.filter(a=>a.patient_type==="new").length},{l:"Follow-up",v:data.filter(a=>a.patient_type==="follow_up").length},{l:"Collected",v:inr(coll)},{l:"Pending",v:inr(pend)},{l:"Total billed",v:inr(total)}].map(({l,v})=>(
+        <div key={l} style={{background:"#fff",borderRadius:10,padding:"10px 12px",border:"1px solid #e8e8e8"}}>
+          <div style={{fontSize:11,color:"#aaa",marginBottom:4}}>{l}</div>
+          <div style={{fontSize:16,fontWeight:700}}>{v}</div>
+        </div>
+      ))}
+    </div>
+    <div className="card" style={{padding:"14px 16px",marginBottom:14}}>
+      <div style={{fontSize:13,fontWeight:700,color:"#555",marginBottom:12}}>Collected by payment mode</div>
+      <div style={{display:"flex",gap:8}}>
+        {["cash","upi","card"].map(md=>{
+          const v=data.filter(a=>a.fee_status==="paid"&&a.payment_mode===md).reduce((s,a)=>s+(+a.fee_amount||0),0);
+          const pct=coll>0?Math.round(v/coll*100):0;
+          return(
+            <div key={md} style={{flex:1,background:"#F7F7F5",borderRadius:9,padding:"10px",textAlign:"center"}}>
+              <div style={{fontSize:11,color:"#aaa",textTransform:"capitalize",marginBottom:4}}>{md}</div>
+              <div style={{fontSize:16,fontWeight:700}}>{inr(v)}</div>
+              <div style={{fontSize:11,color:"#ccc",marginTop:2}}>{pct}%</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+    {chart.length>0&&<>
+      <div className="card" style={{padding:"14px 16px",marginBottom:14}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#555",marginBottom:12}}>Daily patients</div>
+        <ResponsiveContainer width="100%" height={160}>
+          <BarChart data={chart} margin={{top:0,right:0,bottom:0,left:-20}}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" vertical={false}/>
+            <XAxis dataKey="day" tick={{fontSize:10}}/>
+            <YAxis tick={{fontSize:10}} allowDecimals={false}/>
+            <Tooltip/>
+            <Legend iconSize={10} wrapperStyle={{fontSize:11}}/>
+            <Bar dataKey="New" fill="#1D9E75" stackId="a"/>
+            <Bar dataKey="Followup" name="Follow-up" fill="#9FE1CB" stackId="a" radius={[3,3,0,0]}/>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="card" style={{padding:"14px 16px"}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#555",marginBottom:12}}>Daily revenue (₹)</div>
+        <ResponsiveContainer width="100%" height={140}>
+          <LineChart data={chart} margin={{top:0,right:10,bottom:0,left:-10}}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" vertical={false}/>
+            <XAxis dataKey="day" tick={{fontSize:10}}/>
+            <YAxis tick={{fontSize:10}}/>
+            <Tooltip formatter={v=>"₹"+v.toLocaleString("en-IN")}/>
+            <Line type="monotone" dataKey="Revenue" stroke="#0F6E56" strokeWidth={2} dot={false}/>
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </>}
+    {data.length===0&&<div style={{textAlign:"center",padding:"3rem",color:"#ccc",fontSize:13}}>No appointments recorded this month yet.</div>}
+  </>);
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
